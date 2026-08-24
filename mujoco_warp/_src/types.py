@@ -2438,6 +2438,7 @@ class RenderContext:
     mesh_texcoord: mesh texture coordinates
     mesh_texcoord_offsets: mesh texture coordinate offsets
     mesh_facetexcoord: mesh face texture coordinates
+    mesh_texcoordnum: number of texture coordinates per mesh (0: none)
     textures: textures
     textures_registry: texture registry
     hfield_registry: hfield BVH id to warp mesh mapping
@@ -2458,7 +2459,11 @@ class RenderContext:
     upper: upper bounds
     group: groups
     group_root: group roots
-    ray: rays
+    ray: per-pixel ray directions, local camera space
+    ray_origin_offset: per-pixel ray origin offsets, local camera space (zero
+      for perspective cameras; nonzero and per-pixel for orthographic ones,
+      whose rays are parallel and so need their fan-out here instead of in
+      the direction)
     rgb_data: RGB data
     rgb_adr: RGB addresses
     depth_data: depth data
@@ -2543,6 +2548,7 @@ class RenderContext:
   mesh_texcoord: array("*", wp.vec2)
   mesh_texcoord_offsets: array("nmesh", int)
   mesh_facetexcoord: array("nmeshface", wp.vec3i)
+  mesh_texcoordnum: array("nmesh", int)
   textures: array("*", wp.Texture2D)
   textures_registry: list[wp.Texture2D]
   hfield_registry: dict
@@ -2564,6 +2570,7 @@ class RenderContext:
   group: array("*", int)
   group_root: array("*", int)
   ray: array("*", wp.vec3)
+  ray_origin_offset: array("*", wp.vec3)
   rgb_data: array("*", wp.uint32)
   rgb_adr: array("ncam", int)
   depth_data: array("*", wp.float32)

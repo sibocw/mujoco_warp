@@ -4076,10 +4076,13 @@ def _build_rays(
   znear: float,
   # Out:
   ray_out: wp.array[wp.vec3],
+  ray_origin_offset_out: wp.array[wp.vec3],
 ):
   xid, yid = wp.tid()
-  ray_out[offset + xid + yid * img_w] = render_util.compute_ray(
-    projection, fovy, sensorsize, intrinsic, img_w, img_h, xid, yid, znear
+  idx = offset + xid + yid * img_w
+  ray_out[idx] = render_util.compute_ray(projection, fovy, sensorsize, intrinsic, img_w, img_h, xid, yid, znear)
+  ray_origin_offset_out[idx] = render_util.compute_ray_origin_offset(
+    projection, fovy, sensorsize, intrinsic, img_w, img_h, xid, yid
   )
 
 
@@ -4356,6 +4359,7 @@ def create_render_context(
   znear = mjm.vis.map.znear * mjm.stat.extent
 
   ray = wp.zeros(int(total), dtype=wp.vec3)
+  ray_origin_offset = wp.zeros(int(total), dtype=wp.vec3)
 
   cam_projection = mjm.cam_projection
 
@@ -4376,7 +4380,7 @@ def create_render_context(
         wp.vec4(mjm.cam_intrinsic[cam_id]),
         znear,
       ],
-      outputs=[ray],
+      outputs=[ray, ray_origin_offset],
     )
     offset += img_w * img_h
 
@@ -4422,6 +4426,7 @@ def create_render_context(
     mesh_bounds_size=mesh_bounds_size_arr,
     mesh_texcoord=wp.array(mjm.mesh_texcoord, dtype=wp.vec2),
     mesh_texcoord_offsets=wp.array(mjm.mesh_texcoordadr, dtype=int),
+    mesh_texcoordnum=wp.array(mjm.mesh_texcoordnum, dtype=int),
     mesh_facetexcoord=wp.array(mjm.mesh_facetexcoord, dtype=wp.vec3i),
     textures=textures,
     textures_registry=textures_registry,
@@ -4444,6 +4449,7 @@ def create_render_context(
     group=wp.zeros(nworld * (bvh_ngeom + len(flex_geom_flexid)), dtype=int),
     group_root=wp.zeros(nworld, dtype=int),
     ray=ray,
+    ray_origin_offset=ray_origin_offset,
     rgb_data=wp.zeros((nworld, ri), dtype=wp.uint32),
     rgb_adr=wp.array(rgb_adr, dtype=int),
     depth_data=wp.zeros((nworld, di), dtype=wp.float32),

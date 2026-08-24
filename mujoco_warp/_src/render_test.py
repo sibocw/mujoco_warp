@@ -377,6 +377,115 @@ class RenderTest(parameterized.TestCase):
 
     np.testing.assert_array_equal(warp_seg_np, mj_seg)
 
+  def test_render_textured_mesh_without_texcoords(self):
+    """TODO.
+
+    A textured material on a mesh with no texture coordinates of its own
+    (mesh_texcoordnum == 0, e.g. a procedurally-textured CAD mesh that was
+    never UV-unwrapped -- FlyGym's NeuroMechFly model is entirely built from
+    meshes like this) must not crash: `sample_texture`'s mesh branch used to
+    index directly into mesh_facetexcoord/mesh_texcoord, which aren't
+    allocated any room at all for a mesh with zero texcoords, causing an
+    illegal GPU memory access as soon as such a geom was actually hit by a
+    ray (reproduced with a real stepped simulation, not just a static
+    render; see notes on this fix for the full repro).
+    """
+    xml = """
+    <mujoco>
+      <asset>
+        <texture name="tex" builtin="flat" rgb1="0.6 0.3 0.1" width="8" height="8"/>
+        <material name="mat" texture="tex"/>
+        <mesh name="tetra" vertex="0 0 0  1 0 0  0 1 0  0 0 1"
+              face="0 1 2  0 1 3  0 2 3  1 2 3"/>
+      </asset>
+      <worldbody>
+        <light pos="0 0 5"/>
+        <camera name="cam" pos="0.3 -3 0.3" xyaxes="1 0 0 0 0 1"/>
+        <geom type="mesh" mesh="tetra" material="mat"/>
+      </worldbody>
+    </mujoco>
+    """
+    mjm, mjd, m, d = test_data.fixture(xml=xml)
+    self.assertEqual(mjm.mesh_texcoordnum[0], 0, "fixture must exercise a UV-less mesh")
+
+    rc = mjw.create_render_context(mjm, cam_res=(48, 48), render_rgb=True)
+    mjw.render(m, d, rc)  # must not raise (previously an illegal memory access)
+
+    rgb = _unpack_rgb(rc.rgb_data.numpy()[0]).reshape(48, 48, 3)
+    self.assertGreater(np.count_nonzero(rgb), 0, "the mesh should still be visible")
+
+  def test_render_segmentation_orthographic(self):
+    """TODO.
+
+    An orthographic camera's rays must fan out across pixels, not collapse
+    to one shared ray (regression test: `compute_ray`'s orthographic branch
+    returns a single constant direction for every pixel by design -- an
+    orthographic camera's parallel rays differ only in origin, not
+    direction -- so the origin itself must be offset per pixel, via
+    `compute_ray_origin_offset`, or the whole image reduces to whatever one
+    ray happens to hit).
+    """
+    xml = """
+    <mujoco>
+      <worldbody>
+        <light pos="0 0 5"/>
+        <camera name="cam" pos="0 0 3"/>
+        <geom name="left" type="sphere" size="0.3" pos="-1 0 0"/>
+        <geom name="right" type="sphere" size="0.3" pos="1 0 0"/>
+      </worldbody>
+    </mujoco>
+    """
+    mjm, mjd, m, d = test_data.fixture(xml=xml)
+    cam_id = mujoco.mj_name2id(mjm, mujoco.mjtObj.mjOBJ_CAMERA, "cam")
+    mjm.cam_projection[cam_id] = mujoco.mjtProjection.mjPROJ_ORTHOGRAPHIC
+    mjm.cam_fovy[cam_id] = 4.0  # mm, full height (see MjModel.cam_fovy's own doc)
+    m = mjw.put_model(mjm)
+
+    rc = mjw.create_render_context(mjm, nworld=1, cam_res=(64, 64), render_rgb=False, render_depth=False, render_seg=True)
+    mjw.render(m, d, rc)
+
+    seg = rc.seg_data.numpy().reshape(1, 64, 64, 2)[0]
+    left_ids = set(np.unique(seg[:, :32, 0])) - {-1}
+    right_ids = set(np.unique(seg[:, 32:, 0])) - {-1}
+    self.assertTrue(left_ids, "left half of the frame should hit the left sphere")
+    self.assertTrue(right_ids, "right half of the frame should hit the right sphere")
+    self.assertFalse(left_ids & right_ids, "the two spheres are distinct geoms")
+
+  @absltest.skipIf(not _HAS_RENDERER, "MuJoCo rendering requires OpenGL")
+  def test_segmentation_orthographic_matches_mujoco(self):
+    """TODO.
+
+    Orthographic segmentation should match native MuJoCo, same as the
+    perspective case in `test_segmentation_matches_mujoco`.
+    """
+    xml = """
+    <mujoco>
+      <worldbody>
+        <light pos="0 0 5"/>
+        <camera name="cam" pos="0 0 3"/>
+        <geom name="left" type="sphere" size="0.3" pos="-1 0 0"/>
+        <geom name="right" type="sphere" size="0.3" pos="1 0 0"/>
+      </worldbody>
+    </mujoco>
+    """
+    mjm, mjd, _m, d = test_data.fixture(xml=xml)
+    cam_id = mujoco.mj_name2id(mjm, mujoco.mjtObj.mjOBJ_CAMERA, "cam")
+    mjm.cam_projection[cam_id] = mujoco.mjtProjection.mjPROJ_ORTHOGRAPHIC
+    mjm.cam_fovy[cam_id] = 4.0
+    m = mjw.put_model(mjm)
+    cam_w, cam_h = 64, 64
+
+    rc = mjw.create_render_context(mjm, nworld=1, cam_res=(cam_w, cam_h), render_seg=[True])
+    mjw.render(m, d, rc)
+    warp_seg_np = rc.seg_data.numpy()[0].reshape(-1, 2)
+
+    with mujoco.Renderer(mjm, height=cam_h, width=cam_w) as renderer:
+      renderer.update_scene(mjd, camera="cam")
+      renderer.enable_segmentation_rendering()
+      mj_seg = renderer.render().reshape(-1, 2)
+
+    np.testing.assert_array_equal(warp_seg_np, mj_seg)
+
   @absltest.skipIf(not _HAS_RENDERER, "MuJoCo rendering requires OpenGL")
   def test_depth_matches_mujoco(self):
     """Depth values should match native MuJoCo (planar depth, not Euclidean)."""

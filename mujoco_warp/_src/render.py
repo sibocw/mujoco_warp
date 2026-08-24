@@ -31,6 +31,7 @@ from mujoco_warp._src.ray import ray_mesh_with_bvh_anyhit
 from mujoco_warp._src.ray import ray_plane
 from mujoco_warp._src.ray import ray_sphere
 from mujoco_warp._src.render_util import compute_ray
+from mujoco_warp._src.render_util import compute_ray_origin_offset
 from mujoco_warp._src.render_util import pack_rgba_to_uint32
 from mujoco_warp._src.types import MJ_MAXVAL
 from mujoco_warp._src.types import Data
@@ -175,6 +176,7 @@ def sample_texture(
   geom_type: wp.array[int],
   mesh_faceadr: wp.array[int],
   # In:
+  mesh_texcoordnum: wp.array[int],
   geom_id: int,
   tex_repeat: wp.vec2,
   tex: wp.Texture2D,
@@ -201,15 +203,27 @@ def sample_texture(
     uv = wp.vec2(0.5 * local[0], -0.5 * local[1])
     offset = wp.vec2(-0.5, -0.5)
 
+  # Meshes with no texture coordinates of their own (mesh_texcoordnum[mesh_id] == 0,
+  # e.g. procedurally-textured CAD meshes that were never UV-unwrapped) have nothing
+  # for mesh_facetexcoord/mesh_texcoord to actually index -- both are sized by total
+  # texcoords across all meshes that HAVE any, so a mesh with none isn't allocated any
+  # room there at all. Indexing in that case previously read out of bounds (a real
+  # illegal-memory-access crash on some models, e.g. FlyGym's NeuroMechFly, whose
+  # meshes are all UV-less). Left at uv=(0,0) instead, same as a geom type with no
+  # texgen at all: a reasonable fallback for a texture that was never meant to be
+  # mapped per-vertex in the first place.
   if geom_type[geom_id] == GeomType.MESH:
     if f < 0 or mesh_id < 0:
       return wp.vec3(0.0, 0.0, 0.0)
 
-    face_adr = mesh_faceadr[mesh_id] + f
-    uv0 = mesh_texcoord[mesh_texcoord_offsets[mesh_id] + mesh_facetexcoord[face_adr][0]]
-    uv1 = mesh_texcoord[mesh_texcoord_offsets[mesh_id] + mesh_facetexcoord[face_adr][1]]
-    uv2 = mesh_texcoord[mesh_texcoord_offsets[mesh_id] + mesh_facetexcoord[face_adr][2]]
-    uv = uv0 * bary_u + uv1 * bary_v + uv2 * (1.0 - bary_u - bary_v)
+    if mesh_texcoordnum[mesh_id] == 0:
+      uv = wp.vec2(0.0, 0.0)
+    else:
+      face_adr = mesh_faceadr[mesh_id] + f
+      uv0 = mesh_texcoord[mesh_texcoord_offsets[mesh_id] + mesh_facetexcoord[face_adr][0]]
+      uv1 = mesh_texcoord[mesh_texcoord_offsets[mesh_id] + mesh_facetexcoord[face_adr][1]]
+      uv2 = mesh_texcoord[mesh_texcoord_offsets[mesh_id] + mesh_facetexcoord[face_adr][2]]
+      uv = uv0 * bary_u + uv1 * bary_v + uv2 * (1.0 - bary_u - bary_v)
 
   u = uv[0] * tex_repeat[0] + offset[0]
   v = uv[1] * tex_repeat[1] + offset[1]
@@ -725,6 +739,7 @@ def render(m: Model, d: Data, rc: RenderContext):
     cam_res: wp.array[wp.vec2i],
     cam_id_map: wp.array[int],
     ray: wp.array[wp.vec3],
+    ray_origin_offset: wp.array[wp.vec3],
     rgb_adr: wp.array[int],
     depth_adr: wp.array[int],
     seg_adr: wp.array[int],
@@ -740,6 +755,7 @@ def render(m: Model, d: Data, rc: RenderContext):
     mesh_facetexcoord: wp.array[wp.vec3i],
     mesh_texcoord: wp.array[wp.vec2],
     mesh_texcoord_offsets: wp.array[int],
+    mesh_texcoordnum: wp.array[int],
     hfield_bvh_id: wp.array[wp.uint64],
     flex_rgba: wp.array[wp.vec4],
     flex_geom_flexid: wp.array[int],
@@ -782,6 +798,7 @@ def render(m: Model, d: Data, rc: RenderContext):
 
     if wp.static(rc_static["use_precomputed_rays"]):
       ray_dir_local_cam = ray[rayid]
+      ray_origin_offset_local_cam = ray_origin_offset[rayid]
     else:
       img_w = cam_res[camid][0]
       img_h = cam_res[camid][1]
@@ -798,9 +815,23 @@ def render(m: Model, d: Data, rc: RenderContext):
         py,
         wp.static(rc_static["znear"]),
       )
+      ray_origin_offset_local_cam = compute_ray_origin_offset(
+        cam_projection[mujoco_cam_id],
+        cam_fovy[worldid % cam_fovy.shape[0], mujoco_cam_id],
+        cam_sensorsize[mujoco_cam_id],
+        cam_intrinsic[worldid % cam_intrinsic.shape[0], mujoco_cam_id],
+        img_w,
+        img_h,
+        px,
+        py,
+      )
 
-    ray_origin_world = cam_xpos_in[worldid, mujoco_cam_id]
     cam_mat_world = cam_xmat_in[worldid, mujoco_cam_id]
+    # For a perspective camera, ray_origin_offset_local_cam is always zero
+    # (all its rays genuinely originate at the pinhole); for an orthographic
+    # one, this is what actually fans its parallel rays out across the image
+    # (see render_util.compute_ray_origin_offset).
+    ray_origin_world = cam_xpos_in[worldid, mujoco_cam_id] + cam_mat_world @ ray_origin_offset_local_cam
     ray_dir_world = cam_mat_world @ ray_dir_local_cam
 
     geom_id, dist, normal, u, v, f, mesh_id = cast_ray(
@@ -928,6 +959,7 @@ def render(m: Model, d: Data, rc: RenderContext):
             tex_color = sample_texture(
               geom_type,
               mesh_faceadr,
+              mesh_texcoordnum,
               geom_id,
               mat_texrepeat[worldid % mat_texrepeat.shape[0], mat_id],
               textures[tex_id],
@@ -1137,6 +1169,7 @@ def render(m: Model, d: Data, rc: RenderContext):
       rc.cam_res,
       rc.cam_id_map,
       rc.ray,
+      rc.ray_origin_offset,
       rc.rgb_adr,
       rc.depth_adr,
       rc.seg_adr,
@@ -1152,6 +1185,7 @@ def render(m: Model, d: Data, rc: RenderContext):
       rc.mesh_facetexcoord,
       rc.mesh_texcoord,
       rc.mesh_texcoord_offsets,
+      rc.mesh_texcoordnum,
       rc.hfield_bvh_id,
       rc.flex_rgba,
       rc.flex_geom_flexid,

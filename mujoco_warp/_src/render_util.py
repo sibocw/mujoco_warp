@@ -82,6 +82,15 @@ def compute_ray(
   inside a kernel when camera parameters are batched/randomized across worlds.
   """
   if projection == ProjectionType.ORTHOGRAPHIC:
+    # All rays are parallel (the whole point of orthographic projection): a
+    # single shared direction, with the per-pixel fan-out that a perspective
+    # camera gets from its direction instead pushed onto the ray's origin
+    # (see compute_ray_origin_offset). Getting the origin offset right is
+    # exactly the fix that makes orthographic cameras actually usable here (a
+    # previous version of this function returned this same constant
+    # direction for every pixel and never offset the origin at all, which
+    # collapses an orthographic camera's whole image to whatever one ray
+    # happens to hit).
     return wp.vec3(0.0, 0.0, -1.0)
 
   aspect = float(img_w) / float(img_h)
@@ -123,6 +132,64 @@ def compute_ray(
   y = top + (bottom - top) * v
 
   return wp.normalize(wp.vec3(x, y, -znear))
+
+
+@wp.func
+def compute_ray_origin_offset(
+  # In:
+  projection: int,
+  fovy: float,
+  sensorsize: wp.vec2,
+  intrinsic: wp.vec4,
+  img_w: int,
+  img_h: int,
+  px: int,
+  py: int,
+) -> wp.vec3:
+  """Per-pixel ray origin offset, in local camera space (see compute_ray).
+
+  Zero for a perspective camera (all its rays genuinely originate at the
+  pinhole; the per-pixel fan-out is entirely in the direction). For an
+  orthographic camera, this is where that fan-out actually lives: the same
+  frustum's `left`/`right`/`top`/`bottom` extent as `compute_ray`'s own
+  intrinsics-or-fovy branch computes, but evaluated directly (not scaled by
+  `znear`, since an orthographic frustum's cross-section doesn't shrink
+  toward a point the way a perspective one does).
+  """
+  if projection != ProjectionType.ORTHOGRAPHIC:
+    return wp.vec3(0.0, 0.0, 0.0)
+
+  aspect = float(img_w) / float(img_h)
+  sensor_h = sensorsize[1]
+
+  if sensor_h != 0.0:
+    sensor_w = sensorsize[0]
+    target_aspect = float(img_w) / float(img_h)
+    sensor_aspect = sensor_w / sensor_h
+    if target_aspect > sensor_aspect:
+      sensor_h = sensor_w / target_aspect
+    elif target_aspect < sensor_aspect:
+      sensor_w = sensor_h * target_aspect
+    half_width = sensor_w * 0.5
+    half_height = sensor_h * 0.5
+  else:
+    # Orthographic `fovy` is a length (the full vertical extent), not an
+    # angle: unlike compute_ray's perspective branch, there's no `tan()`
+    # here (see MjModel.cam_fovy's own doc: "orthographic ? length : degree").
+    half_height = fovy * 0.5
+    half_width = half_height * aspect
+
+  left = -half_width
+  right = half_width
+  top = half_height
+  bottom = -half_height
+
+  u = (float(px) + 0.5) / float(img_w)
+  v = (float(py) + 0.5) / float(img_h)
+  x = left + (right - left) * u
+  y = top + (bottom - top) * v
+
+  return wp.vec3(x, y, 0.0)
 
 
 @wp.func

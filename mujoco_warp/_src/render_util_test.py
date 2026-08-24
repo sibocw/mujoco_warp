@@ -77,6 +77,34 @@ class RenderUtilTest(absltest.TestCase):
       "perspective != orthographic raydir",
     )
 
+  def test_compute_ray_origin_offset(self):
+    """Zero for perspective; nonzero and pixel-dependent for orthographic."""
+    img_w, img_h = 2, 2
+    fovy = 4.0  # mm, full height, since orthographic fovy is a length
+    sensorsize = wp.vec2(0.0, 0.0)
+    intrinsic = wp.vec4(0.0, 0.0, 0.0, 0.0)
+
+    persp_offset = render_util.compute_ray_origin_offset(
+      int(types.ProjectionType.PERSPECTIVE), fovy, sensorsize, intrinsic, img_w, img_h, 0, 0
+    )
+    np.testing.assert_allclose(np.array(persp_offset), [0.0, 0.0, 0.0])
+
+    top_left = render_util.compute_ray_origin_offset(
+      int(types.ProjectionType.ORTHOGRAPHIC), fovy, sensorsize, intrinsic, img_w, img_h, 0, 0
+    )
+    bottom_right = render_util.compute_ray_origin_offset(
+      int(types.ProjectionType.ORTHOGRAPHIC), fovy, sensorsize, intrinsic, img_w, img_h, 1, 1
+    )
+    # Distinct pixels must get distinct origins (this is the whole point: an
+    # orthographic camera's rays are parallel, so per-pixel variation has to
+    # live here instead of in the direction), symmetric about the center,
+    # and z stays 0 (the offset is purely lateral, in the camera's own image
+    # plane).
+    self.assertFalse(np.allclose(np.array(top_left), np.array(bottom_right)))
+    np.testing.assert_allclose(np.array(top_left)[:2], -np.array(bottom_right)[:2], atol=1e-5)
+    self.assertEqual(top_left[2], 0.0)
+    self.assertEqual(bottom_right[2], 0.0)
+
   def test_get_segmentation(self):
     """Tests that get_segmentation extracts MuJoCo-style typed IDs."""
     mjm, mjd, m, d = test_data.fixture("primitives.xml", nworld=2)
